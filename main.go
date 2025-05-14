@@ -8,27 +8,32 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 )
 
 type MergeRequest struct {
-	Title  string `json:"title"`
-	WebURL string `json:"web_url"`
-	Author struct {
+	IID         int    `json:"iid"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	WebURL      string `json:"web_url"`
+	Author      struct {
 		Username string `json:"username"`
 	} `json:"author"`
 }
 
-func getRenovateMRs() ([]MergeRequest, error) {
-	projectID := os.Getenv("GITLAB_PROJECT_ID")
-        if projectID == "" {
-	  projectID = os.Getenv("CI_PROJECT_ID")
-        }
-	token := os.Getenv("GITLAB_TOKEN")
-	gitlabURL := os.Getenv("GITLAB_URL")
-	if gitlabURL == "" {
-		gitlabURL = os.Getenv("CI_SERVER_URL")
+func getEnv(key, fallback string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
 	}
-	renovateUsername := os.Getenv("RENOVATE_USERNAME")
+	return v
+}
+
+func getRenovateMRs() ([]MergeRequest, error) {
+	projectID := getEnv("GITLAB_PROJECT_ID", os.Getenv("CI_PROJECT_ID"))
+	gitlabURL := getEnv("GITLAB_URL", os.Getenv("CI_SERVER_URL"))
+	token := os.Getenv("GITLAB_TOKEN")
+	renovateUsername := getEnv("RENOVATE_USERNAME", "renovate[bot]")
 	url := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests?state=opened", gitlabURL, projectID)
 
 	req, _ := http.NewRequest("GET", url, nil)
@@ -54,10 +59,50 @@ func getRenovateMRs() ([]MergeRequest, error) {
 	return renovateMRs, nil
 }
 
-func createJiraIssue(title, description string, dryRun bool) error {
+
+func hasJiraKey(text string) (string, bool) {
+	projectKey := os.Getenv("JIRA_PROJECT_KEY")
+	jiraRegex := regexp.MustCompile(fmt.Sprintf(`%s-\d+`, regexp.QuoteMeta(projectKey)))
+	match := jiraRegex.FindString(text)
+	return match, match != ""
+}
+
+func mrHasLinkedJira(mr MergeRequest, projectID, token, gitlabURL string) (bool, error) {
+	// Check title and description first
+	if _, found := hasJiraKey(mr.Title); found {
+		return true, nil
+	}
+	if _, found := hasJiraKey(mr.Description); found {
+		return true, nil
+	}
+
+	// Then check comments
+	url := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d/notes", gitlabURL, projectID, mr.IID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	var notes []struct{ Body string `json:"body"` }
+	if err := json.NewDecoder(resp.Body).Decode(&notes); err != nil {
+		return false, err
+	}
+
+	for _, note := range notes {
+		if _, found := hasJiraKey(note.Body); found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func createJiraIssue(title, description string, dryRun bool) (string, error) {
 	if dryRun {
 		fmt.Printf("[DRY-RUN] Would create Jira issue:\n  Title: %s\n  Desc: %s\n\n", title, description)
-		return nil
+		return "DRY-123", nil
 	}
 
 	jiraURL := os.Getenv("JIRA_URL")
@@ -85,21 +130,61 @@ func createJiraIssue(title, description string, dryRun bool) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Jira error: %s", string(respBody))
+	}
+
+	var respData struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
+		return "", err
+	}
+
+	return respData.Key, nil
+}
+
+func commentOnMR(mrIID int, projectID, token, gitlabURL, jiraKey string, dryRun bool) error {
+	comment := fmt.Sprintf("Jira issue created: [%s](%s/browse/%s)", jiraKey, os.Getenv("JIRA_URL"), jiraKey)
+	if dryRun {
+		fmt.Printf("[DRY-RUN] Would comment on MR %d: %s\n", mrIID, comment)
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d/notes", gitlabURL, projectID, mrIID)
+	payload := map[string]string{"body": comment}
+	body, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req.Header.Set("PRIVATE-TOKEN", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Jira error: %s", string(respBody))
+		return fmt.Errorf("GitLab comment error: %s", string(respBody))
 	}
 
 	return nil
 }
 
 func main() {
-	dryRun := flag.Bool("dry-run", false, "Print what would be done without making changes")
+	dryRun := flag.Bool("dry-run", false, "Print actions without making changes")
 	flag.Parse()
+
+	projectID := getEnv("GITLAB_PROJECT_ID", os.Getenv("CI_PROJECT_ID"))
+	gitlabURL := getEnv("GITLAB_URL", os.Getenv("CI_SERVER_URL"))
+	token := os.Getenv("GITLAB_TOKEN")
 
 	mrs, err := getRenovateMRs()
 	if err != nil {
@@ -107,20 +192,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *dryRun {
-		fmt.Printf("Found %d Renovate MRs:\n", len(mrs))
-		for _, mr := range mrs {
-			fmt.Printf("- Title: %s\n  URL: %s\n", mr.Title, mr.WebURL)
-		}
-		fmt.Println()
-	}
-
 	for _, mr := range mrs {
-		err := createJiraIssue(mr.Title, mr.WebURL, *dryRun)
+		hasJira, err := mrHasLinkedJira(mr, projectID, token, gitlabURL)
 		if err != nil {
-			fmt.Printf("Failed to create Jira issue for MR %s: %v\n", mr.WebURL, err)
-		} else if !*dryRun {
-			fmt.Printf("Created Jira issue for MR: %s\n", mr.WebURL)
+			fmt.Printf("Error checking MR %d: %v\n", mr.IID, err)
+			continue
+		}
+		if hasJira {
+			fmt.Printf("MR %d already linked to a Jira issue, skipping.\n", mr.IID)
+			continue
+		}
+
+		jiraKey, err := createJiraIssue(mr.Title, mr.WebURL, *dryRun)
+		if err != nil {
+			fmt.Printf("Failed to create Jira issue for MR %d: %v\n", mr.IID, err)
+			continue
+		}
+
+		err = commentOnMR(mr.IID, projectID, token, gitlabURL, jiraKey, *dryRun)
+		if err != nil {
+			fmt.Printf("Failed to comment on MR %d: %v\n", mr.IID, err)
 		}
 	}
 }
