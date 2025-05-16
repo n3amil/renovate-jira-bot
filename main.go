@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 )
 
 type MergeRequest struct {
@@ -59,12 +60,26 @@ func getRenovateMRs() ([]MergeRequest, error) {
 	return renovateMRs, nil
 }
 
-
 func hasJiraKey(text string) (string, bool) {
 	projectKey := os.Getenv("JIRA_PROJECT_KEY")
 	jiraRegex := regexp.MustCompile(fmt.Sprintf(`%s-\d+`, regexp.QuoteMeta(projectKey)))
 	match := jiraRegex.FindString(text)
 	return match, match != ""
+}
+
+func containsKeyword(mr MergeRequest) bool {
+	keywords := strings.Split(os.Getenv("KEYWORDS_TO_SKIP"), ",")
+	for _, keyword := range keywords {
+		if containsIgnoreCase(mr.Title, keyword) || containsIgnoreCase(mr.Description, keyword) {
+			fmt.Printf("MR %d contains keywords to be skipped, skipping.\n", mr.IID)
+			return true
+		}
+	}
+	return false
+}
+
+func containsIgnoreCase(text, substr string) bool {
+	return strings.Contains(strings.ToLower(text), strings.ToLower(substr))
 }
 
 func mrHasLinkedJira(mr MergeRequest, projectID, token, gitlabURL string) (bool, error) {
@@ -86,7 +101,9 @@ func mrHasLinkedJira(mr MergeRequest, projectID, token, gitlabURL string) (bool,
 	}
 	defer resp.Body.Close()
 
-	var notes []struct{ Body string `json:"body"` }
+	var notes []struct {
+		Body string `json:"body"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&notes); err != nil {
 		return false, err
 	}
@@ -185,7 +202,6 @@ func main() {
 	projectID := getEnv("GITLAB_PROJECT_ID", os.Getenv("CI_PROJECT_ID"))
 	gitlabURL := getEnv("GITLAB_URL", os.Getenv("CI_SERVER_URL"))
 	token := os.Getenv("GITLAB_TOKEN")
-
 	mrs, err := getRenovateMRs()
 	if err != nil {
 		fmt.Println("Error fetching MRs:", err)
@@ -193,6 +209,10 @@ func main() {
 	}
 
 	for _, mr := range mrs {
+
+		if containsKeyword(mr) {
+			continue
+		}
 		hasJira, err := mrHasLinkedJira(mr, projectID, token, gitlabURL)
 		if err != nil {
 			fmt.Printf("Error checking MR %d: %v\n", mr.IID, err)
@@ -215,4 +235,3 @@ func main() {
 		}
 	}
 }
-
