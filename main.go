@@ -3,12 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -41,8 +41,8 @@ func getRenovateMRs() ([]MergeRequest, error) {
 	req.Header.Set("PRIVATE-TOKEN", token)
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
+	if err != nil || resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Gitlab error: %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 
@@ -196,9 +196,7 @@ func commentOnMR(mrIID int, projectID, token, gitlabURL, jiraKey string, dryRun 
 }
 
 func main() {
-	dryRun := flag.Bool("dry-run", false, "Print actions without making changes")
-	flag.Parse()
-
+	dryRun, _ := strconv.ParseBool(os.Getenv("DRY_RUN"))
 	projectID := getEnv("GITLAB_PROJECT_ID", os.Getenv("CI_PROJECT_ID"))
 	gitlabURL := getEnv("GITLAB_URL", os.Getenv("CI_SERVER_URL"))
 	token := os.Getenv("GITLAB_TOKEN")
@@ -223,13 +221,13 @@ func main() {
 			continue
 		}
 
-		jiraKey, err := createJiraIssue(mr.Title, mr.WebURL, *dryRun)
+		jiraKey, err := createJiraIssue(mr.Title, mr.WebURL, dryRun)
 		if err != nil {
 			fmt.Printf("Failed to create Jira issue for MR %d: %v\n", mr.IID, err)
 			continue
 		}
 
-		err = commentOnMR(mr.IID, projectID, token, gitlabURL, jiraKey, *dryRun)
+		err = commentOnMR(mr.IID, projectID, token, gitlabURL, jiraKey, dryRun)
 		if err != nil {
 			fmt.Printf("Failed to comment on MR %d: %v\n", mr.IID, err)
 		}
