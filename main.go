@@ -196,7 +196,11 @@ func commentOnMR(mrIID int, projectID, token, gitlabURL, jiraKey string, dryRun 
 }
 
 func main() {
-	dryRun, _ := strconv.ParseBool(os.Getenv("DRY_RUN"))
+	dryRunEnv := os.Getenv("DRY_RUN")
+	dryRun, _ := strconv.ParseBool(dryRunEnv)
+	if dryRunEnv == "" {
+		dryRun = true
+	}
 	projectID := getEnv("GITLAB_PROJECT_ID", os.Getenv("CI_PROJECT_ID"))
 	gitlabURL := getEnv("GITLAB_URL", os.Getenv("CI_SERVER_URL"))
 	token := os.Getenv("GITLAB_TOKEN")
