@@ -33,7 +33,7 @@ func getEnv(key, fallback string) string {
 func getRenovateMRs() ([]MergeRequest, error) {
 	projectID := getEnv("GITLAB_PROJECT_ID", os.Getenv("CI_PROJECT_ID"))
 	gitlabURL := getEnv("GITLAB_URL", os.Getenv("CI_SERVER_URL"))
-	token := os.Getenv("GITLAB_TOKEN")
+	token := getEnv("GITLAB_TOKEN", os.Getenv("CI_JOB_TOKEN"))
 	renovateUsername := getEnv("RENOVATE_USERNAME", "renovate[bot]")
 	url := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests?state=opened", gitlabURL, projectID)
 
