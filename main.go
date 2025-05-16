@@ -126,6 +126,7 @@ func createJiraIssue(title, description string, dryRun bool) (string, error) {
 	jiraUser := os.Getenv("JIRA_USER")
 	jiraToken := os.Getenv("JIRA_API_TOKEN")
 	projectKey := os.Getenv("JIRA_PROJECT_KEY")
+	issueType := os.Getenv("JIRA_PROJECT_ISSUE_TYPE")
 
 	data := map[string]interface{}{
 		"fields": map[string]interface{}{
@@ -135,7 +136,7 @@ func createJiraIssue(title, description string, dryRun bool) (string, error) {
 			"summary":     title,
 			"description": description,
 			"issuetype": map[string]string{
-				"name": "Task",
+				"name": issueType,
 			},
 		},
 	}
